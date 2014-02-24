@@ -36,6 +36,9 @@ type Config struct {
 	// An array of local paths of roles to upload.
 	RolePaths []string `mapstructure:"role_paths"`
 
+	// An array of local paths of libraries to upload.
+	LibraryPaths []string `mapstructure:"library_paths"`
+
 	// The directory where files will be uploaded. Packer requires write
 	// permissions in this directory.
 	StagingDir string `mapstructure:"staging_directory"`
@@ -92,6 +95,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		"extra_arguments": p.config.ExtraArguments,
 		"playbook_paths":  p.config.PlaybookPaths,
 		"role_paths":      p.config.RolePaths,
+		"library_paths":   p.config.LibraryPaths,
 	}
 
 	for n, slice := range sliceTemplates {
@@ -133,6 +137,12 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 	for _, path := range p.config.RolePaths {
 		if err := validateDirConfig(path, "role_paths"); err != nil {
+			errs = packer.MultiErrorAppend(errs, err)
+		}
+	}
+
+	for _, path := range p.config.LibraryPaths {
+		if err := validateDirConfig(path, "library_paths"); err != nil {
 			errs = packer.MultiErrorAppend(errs, err)
 		}
 	}
@@ -199,6 +209,16 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		}
 	}
 
+	if len(p.config.LibraryPaths) > 0 {
+		ui.Message("Uploading library directories...")
+		for _, src := range p.config.LibraryPaths {
+			dst := filepath.Join(p.config.StagingDir, filepath.Base(src))
+			if err := p.uploadDir(ui, comm, dst, src); err != nil {
+				return fmt.Errorf("Error uploading libraries: %s", err)
+			}
+		}
+	}
+
 	if err := p.executeAnsible(ui, comm); err != nil {
 		return fmt.Errorf("Error executing Ansible: %s", err)
 	}
@@ -213,6 +233,7 @@ func (p *Provisioner) Cancel() {
 
 func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator) error {
 	playbook := filepath.Join(p.config.StagingDir, filepath.Base(p.config.PlaybookFile))
+	libraries := filepath.Join(p.config.StagingDir, filepath.Base(p.config.LibraryPaths[0]))
 
 	// The inventory must be set to "127.0.0.1,".  The comma is important
 	// as its the only way to override the ansible inventory when dealing
@@ -222,8 +243,8 @@ func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator) err
 		extraArgs = " " + strings.Join(p.config.ExtraArguments, " ")
 	}
 
-	command := fmt.Sprintf("%s %s%s -c local -i \"127.0.0.1,\"",
-		p.config.Command, playbook, extraArgs)
+	command := fmt.Sprintf("%s -M %s %s %s -c local -i \"127.0.0.1,\"",
+		p.config.Command, libraries, playbook, extraArgs)
 	ui.Message(fmt.Sprintf("Executing Ansible: %s", command))
 	cmd := &packer.RemoteCmd{
 		Command: command,
@@ -233,7 +254,7 @@ func (p *Provisioner) executeAnsible(ui packer.Ui, comm packer.Communicator) err
 	}
 	if cmd.ExitStatus != 0 {
 		if cmd.ExitStatus == 127 {
-			return fmt.Errorf("%s could not be found. Verify that it is available on the\n" +
+			return fmt.Errorf("%s could not be found. Verify that it is available on the\n"+
 				"PATH after connecting to the machine.",
 				p.config.Command)
 		}
